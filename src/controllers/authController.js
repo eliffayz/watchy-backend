@@ -43,14 +43,14 @@ const login = async (req, res, next) => {
 
     const result = await db.query('SELECT * FROM users WHERE email = $1 AND account_status = $2', [email, 'active']);
     if (result.rows.length === 0) {
-      return res.status(401).json({ success: false, message: 'Invalid credentials or account inactive' });
+      return res.status(401).json({ success: false, message: 'E-posta veya şifre hatalı' });
     }
 
     const user = result.rows[0];
     const isMatch = await bcrypt.compare(password, user.password_hash);
 
     if (!isMatch) {
-      return res.status(401).json({ success: false, message: 'Invalid credentials' });
+      return res.status(401).json({ success: false, message: 'E-posta veya şifre hatalı' });
     }
 
     const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });

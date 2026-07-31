@@ -29,7 +29,7 @@ app.use('/api', publicRoutes);
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  res.status(500).json({ success: false, message: 'Internal Server Error' });
+  res.status(500).json({ success: false, message: 'Giriş işlemi şu anda tamamlanamadı. Lütfen tekrar deneyin.' });
 });
 
 module.exports = app;
