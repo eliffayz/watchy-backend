@@ -29,7 +29,15 @@ app.use('/api', publicRoutes);
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
-  res.status(500).json({ success: false, message: 'Giriş işlemi şu anda tamamlanamadı. Lütfen tekrar deneyin.' });
+  
+  // Return standard JSON error format
+  res.status(500).json({ 
+    success: false, 
+    error: {
+      code: 'INTERNAL_SERVER_ERROR',
+      message: 'Sunucu tarafında beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.'
+    }
+  });
 });
 
 module.exports = app;
