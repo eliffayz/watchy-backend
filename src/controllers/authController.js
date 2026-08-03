@@ -24,17 +24,32 @@ const register = async (req, res, next) => {
     }
 
     const password_hash = await bcrypt.hash(password, 10);
+    const derivedUsername = username || email.split('@')[0];
     
     const result = await db.query(
-      `INSERT INTO users (email, password_hash, username, phone, age, gender, notifications_enabled, avatar_url) 
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, email, username, role, avatar_url`,
-      [email, password_hash, username || null, phone || null, age ? parseInt(age) : null, gender || null, notifications_enabled !== undefined ? Boolean(notifications_enabled) : true, avatar_url || null]
+      `INSERT INTO users (email, password_hash, username, full_name, phone, age, gender, notifications_enabled, avatar_url, role, account_status) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'user', 'active') 
+       RETURNING id, email, username, full_name, role, avatar_url`,
+      [email, password_hash, derivedUsername, derivedUsername, phone || null, age ? parseInt(age) : null, gender || null, notifications_enabled !== undefined ? Boolean(notifications_enabled) : true, avatar_url || null]
     );
 
     const user = result.rows[0];
-    const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role || 'user' }, 
+      process.env.JWT_SECRET || 'supersecretjwtkey_12345', 
+      { expiresIn: '7d' }
+    );
 
-    res.status(201).json({ success: true, data: { user, token } });
+    const userProfile = { 
+      id: user.id, 
+      email: user.email, 
+      username: user.username, 
+      full_name: user.full_name, 
+      role: user.role, 
+      avatar_url: user.avatar_url 
+    };
+
+    res.status(201).json({ success: true, data: { user: userProfile, token } });
   } catch (error) {
     if (error.code === '23505') {
       return res.status(409).json({ success: false, error: { code: 'EMAIL_EXISTS', message: 'Bu e-posta zaten kayıtlı.' } });
@@ -74,15 +89,21 @@ const login = async (req, res, next) => {
       }
     }
 
-    const token = jwt.sign({ id: user.id, email: user.email, role: user.role || 'user' }, process.env.JWT_SECRET || 'supersecretjwtkey_12345', { expiresIn: '7d' });
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role || 'user' }, 
+      process.env.JWT_SECRET || 'supersecretjwtkey_12345', 
+      { expiresIn: '7d' }
+    );
 
     const userProfile = { 
       id: user.id, 
       email: user.email, 
       username: user.username || user.full_name || user.email.split('@')[0], 
+      full_name: user.full_name || user.username || null,
       role: user.role || 'user', 
       avatar_url: user.avatar_url || null 
     };
+
     res.status(200).json({ success: true, data: { user: userProfile, token } });
   } catch (error) {
     next(error);
@@ -91,79 +112,97 @@ const login = async (req, res, next) => {
 
 const oauthLogin = async (req, res, next) => {
   try {
-    const { provider, token: oauthToken, email, fullName } = req.body;
+    const { provider, email, fullName } = req.body;
+    const oauthToken = req.body.token || req.body.idToken || req.body.identityToken;
 
     if (!provider || !oauthToken) {
       return res.status(400).json({ success: false, error: { code: 'MISSING_FIELDS', message: 'Sağlayıcı ve token zorunludur.' } });
     }
 
-    let userEmail = email;
-    let decodedToken = null;
-
-    try {
-      decodedToken = jwt.decode(oauthToken);
-    } catch (e) {
-      // Ignored
-    }
+    let userEmail = email || null;
+    let userName = fullName || null;
+    let userAvatar = null;
+    let appleSub = null;
+    let googleSub = null;
 
     if (provider === 'apple') {
-      try {
-        const appleAudiences = [
-          process.env.APPLE_AUDIENCE,
-          'com.mobilina.watchy'
-        ].filter(Boolean);
+      const appleAudiences = [
+        process.env.APPLE_AUDIENCE,
+        process.env.APPLE_CLIENT_ID,
+        'com.mobilina.watchy'
+      ].filter(Boolean);
 
-        let verified = false;
-        for (const aud of appleAudiences) {
-          try {
-            const claims = await appleSignin.verifyIdToken(oauthToken, {
-              audience: aud,
-              ignoreExpiration: false
-            });
-            userEmail = claims.email || userEmail;
-            verified = true;
-            break;
-          } catch (vErr) {
-            // try next aud
-          }
-        }
-
-        if (!verified && decodedToken) {
-          userEmail = decodedToken.email || userEmail || (decodedToken.sub ? `${decodedToken.sub}@privaterelay.appleid.com` : null);
-        }
-      } catch (err) {
-        console.error('Apple token verification fallback:', err.message);
-        if (decodedToken?.email) {
-          userEmail = decodedToken.email;
-        } else if (decodedToken?.sub) {
-          userEmail = userEmail || `${decodedToken.sub}@privaterelay.appleid.com`;
+      let verifiedClaims = null;
+      for (const aud of appleAudiences) {
+        try {
+          const claims = await appleSignin.verifyIdToken(oauthToken, {
+            audience: aud,
+            ignoreExpiration: false
+          });
+          verifiedClaims = claims;
+          break;
+        } catch (vErr) {
+          // try next audience if any
         }
       }
-    } else if (provider === 'google') {
-      try {
-        const googleAudiences = [
-          process.env.GOOGLE_IOS_CLIENT_ID,
-          process.env.GOOGLE_WEB_CLIENT_ID,
-          '816721206670-9t7rk38kar9pitd7oq7f8bcev9dc41il.apps.googleusercontent.com'
-        ].filter(Boolean);
 
+      if (!verifiedClaims) {
+        // Fallback for diagnostic/relay decoding
+        try {
+          const decoded = jwt.decode(oauthToken);
+          if (decoded && (decoded.iss === 'https://appleid.apple.com' || decoded.sub)) {
+            verifiedClaims = decoded;
+          }
+        } catch (e) {}
+      }
+
+      if (!verifiedClaims) {
+        return res.status(401).json({ success: false, error: { code: 'INVALID_OAUTH_TOKEN', message: 'Apple girişi doğrulanamadı.' } });
+      }
+
+      appleSub = verifiedClaims.sub;
+      userEmail = verifiedClaims.email || userEmail || (appleSub ? `${appleSub}@privaterelay.appleid.com` : null);
+
+    } else if (provider === 'google') {
+      const googleAudiences = [
+        process.env.GOOGLE_IOS_CLIENT_ID,
+        process.env.GOOGLE_WEB_CLIENT_ID,
+        process.env.GOOGLE_CLIENT_ID,
+        '816721206670-9t7rk38kar9pitd7oq7f8bcev9dc41il.apps.googleusercontent.com'
+      ].filter(Boolean);
+
+      let payload = null;
+      try {
         const ticket = await googleClient.verifyIdToken({
           idToken: oauthToken,
           audience: googleAudiences.length > 0 ? googleAudiences : undefined
         });
-        const payload = ticket.getPayload();
-        userEmail = payload?.email || userEmail;
+        payload = ticket.getPayload();
       } catch (err) {
-        console.error('Google token verification fallback:', err.message);
-        if (decodedToken?.email) {
-          userEmail = decodedToken.email;
-        }
+        console.error('Google verifyIdToken error:', err.message);
+        // Fallback for diagnostic verification
+        try {
+          const decoded = jwt.decode(oauthToken);
+          if (decoded && (decoded.iss?.includes('accounts.google.com') || decoded.email)) {
+            payload = decoded;
+          }
+        } catch (e) {}
       }
+
+      if (!payload) {
+        return res.status(401).json({ success: false, error: { code: 'INVALID_OAUTH_TOKEN', message: 'Google girişi doğrulanamadı.' } });
+      }
+
+      googleSub = payload.sub;
+      userEmail = payload.email || userEmail;
+      userName = payload.name || userName;
+      userAvatar = payload.picture || null;
+
     } else {
       return res.status(400).json({ success: false, error: { code: 'INVALID_PROVIDER', message: 'Geçersiz sağlayıcı.' } });
     }
 
-    if (!userEmail) {
+    if (!userEmail && !appleSub && !googleSub) {
       return res.status(401).json({ 
         success: false, 
         error: { 
@@ -173,39 +212,80 @@ const oauthLogin = async (req, res, next) => {
       });
     }
 
-    // Check if user exists in database
-    const result = await db.query('SELECT * FROM users WHERE email = $1', [userEmail]);
-    let user;
-
-    const derivedUsername = fullName || (userEmail ? userEmail.split('@')[0] : 'User');
-
-    if (result.rows.length === 0) {
-      // Create new user for OAuth with robust schema fallback
-      try {
-        const insertResult = await db.query(
-          `INSERT INTO users (email, password_hash, username, full_name, notifications_enabled, account_status) 
-           VALUES ($1, $2, $3, $4, $5, 'active') 
-           RETURNING id, email, username, role, avatar_url`,
-          [userEmail, 'OAUTH_USER_NO_PASSWORD', derivedUsername, fullName || derivedUsername, true]
-        );
-        user = insertResult.rows[0];
-      } catch (colErr) {
-        const fallbackInsert = await db.query(
-          `INSERT INTO users (email, password_hash, username, notifications_enabled, account_status) 
-           VALUES ($1, $2, $3, $4, 'active') 
-           RETURNING id, email, username, role, avatar_url`,
-          [userEmail, 'OAUTH_USER_NO_PASSWORD', derivedUsername, true]
-        );
-        user = fallbackInsert.rows[0];
+    // Step 1: Find existing user
+    let user = null;
+    if (appleSub) {
+      const appleRes = await db.query('SELECT * FROM users WHERE apple_sub = $1 AND account_status = $2', [appleSub, 'active']);
+      if (appleRes.rows.length > 0) {
+        user = appleRes.rows[0];
       }
+    }
+    
+    if (!user && googleSub) {
+      const googleRes = await db.query('SELECT * FROM users WHERE google_sub = $1 AND account_status = $2', [googleSub, 'active']);
+      if (googleRes.rows.length > 0) {
+        user = googleRes.rows[0];
+      }
+    }
+
+    if (!user && userEmail) {
+      const emailRes = await db.query('SELECT * FROM users WHERE email = $1 AND account_status = $2', [userEmail, 'active']);
+      if (emailRes.rows.length > 0) {
+        user = emailRes.rows[0];
+      }
+    }
+
+    const derivedUsername = userName || (userEmail ? userEmail.split('@')[0] : 'User');
+
+    if (!user) {
+      // Step 2: Create new user with full OAuth details
+      const insertResult = await db.query(
+        `INSERT INTO users (email, password_hash, username, full_name, avatar_url, apple_sub, google_sub, provider, provider_id, notifications_enabled, account_status) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active') 
+         RETURNING id, email, username, full_name, role, avatar_url`,
+        [
+          userEmail || `${provider}_${Date.now()}@privaterelay.watchy.com`, 
+          'OAUTH_USER_NO_PASSWORD', 
+          derivedUsername, 
+          userName || derivedUsername, 
+          userAvatar, 
+          appleSub, 
+          googleSub, 
+          provider, 
+          appleSub || googleSub, 
+          true
+        ]
+      );
+      user = insertResult.rows[0];
     } else {
-      user = result.rows[0];
-      if (!user.username && derivedUsername) {
-        try {
-          await db.query('UPDATE users SET username = $1 WHERE id = $2', [derivedUsername, user.id]);
-          user.username = derivedUsername;
-        } catch (uErr) {
-          // Ignored
+      // Step 3: Update provider identifiers if missing
+      const updates = [];
+      const values = [];
+      let idx = 1;
+
+      if (appleSub && !user.apple_sub) {
+        updates.push(`apple_sub = $${idx++}`);
+        values.push(appleSub);
+      }
+      if (googleSub && !user.google_sub) {
+        updates.push(`google_sub = $${idx++}`);
+        values.push(googleSub);
+      }
+      if (userAvatar && !user.avatar_url) {
+        updates.push(`avatar_url = $${idx++}`);
+        values.push(userAvatar);
+      }
+      if (userName && (!user.full_name || user.full_name === 'User')) {
+        updates.push(`full_name = $${idx++}`);
+        values.push(userName);
+      }
+
+      if (updates.length > 0) {
+        values.push(user.id);
+        const updateQuery = `UPDATE users SET ${updates.join(', ')} WHERE id = $${idx} RETURNING id, email, username, full_name, role, avatar_url`;
+        const updated = await db.query(updateQuery, values);
+        if (updated.rows.length > 0) {
+          user = updated.rows[0];
         }
       }
     }
@@ -220,12 +300,14 @@ const oauthLogin = async (req, res, next) => {
       id: user.id, 
       email: user.email, 
       username: user.username || user.full_name || derivedUsername, 
+      full_name: user.full_name || user.username || null,
       role: user.role || 'user', 
       avatar_url: user.avatar_url || null 
     };
 
     res.status(200).json({ success: true, data: { user: userProfile, token } });
   } catch (error) {
+    console.error('oauthLogin uncaught error:', error);
     if (error.code === '23505') {
       return res.status(409).json({ success: false, error: { code: 'EMAIL_EXISTS', message: 'Bu e-posta zaten kayıtlı.' } });
     }
@@ -234,4 +316,3 @@ const oauthLogin = async (req, res, next) => {
 };
 
 module.exports = { register, login, oauthLogin };
-
