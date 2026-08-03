@@ -1,6 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-
 const path = require('path');
 
 const app = express();
@@ -8,6 +7,19 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+
+// Request logging middleware for diagnostics
+app.use((req, res, next) => {
+  const start = Date.now();
+  const { method, url } = req;
+  
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    console.log(`[HTTP] ${method} ${url} ${res.statusCode} - ${duration}ms`);
+  });
+  
+  next();
+});
 
 // Simple health check endpoint
 app.get('/api/health', (req, res) => {
@@ -28,7 +40,7 @@ app.use('/api', publicRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  console.error('[UNCAUGHT ERROR]:', err.stack || err);
   
   // Return standard JSON error format
   res.status(500).json({ 

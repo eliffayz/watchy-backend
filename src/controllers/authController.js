@@ -6,34 +6,64 @@ const appleSignin = require('apple-signin-auth');
 
 const googleClient = new OAuth2Client();
 
+const maskEmail = (email) => {
+  if (!email || typeof email !== 'string') return '***';
+  const parts = email.split('@');
+  if (parts.length !== 2) return '***';
+  const name = parts[0];
+  const maskedName = name.length > 2 ? `${name[0]}***${name[name.length - 1]}` : `${name[0]}***`;
+  return `${maskedName}@${parts[1]}`;
+};
+
 const register = async (req, res, next) => {
   try {
     const { email, password, username, phone, age, gender, notifications_enabled, avatar_url } = req.body;
 
     if (!email || !password) {
-      return res.status(400).json({ success: false, error: { code: 'MISSING_FIELDS', message: 'E-posta ve şifre zorunludur.' } });
-    }
-    if (password.length < 8) {
-      return res.status(400).json({ success: false, error: { code: 'WEAK_PASSWORD', message: 'Şifre en az 8 karakter olmalıdır.' } });
+      return res.status(400).json({ 
+        success: false, 
+        error: { code: 'MISSING_FIELDS', message: 'E-posta ve şifre zorunludur.' } 
+      });
     }
 
-    // Check if user exists
-    const userCheck = await db.query('SELECT id FROM users WHERE email = $1', [email]);
+    const normalizedEmail = email.trim().toLowerCase();
+    console.log(`[Auth Register] Processing registration for: ${maskEmail(normalizedEmail)}`);
+
+    if (password.length < 8) {
+      return res.status(400).json({ 
+        success: false, 
+        error: { code: 'WEAK_PASSWORD', message: 'Şifre en az 8 karakter olmalıdır.' } 
+      });
+    }
+
+    // Check if user exists (case-insensitive)
+    const userCheck = await db.query('SELECT id FROM users WHERE LOWER(email) = LOWER($1)', [normalizedEmail]);
     if (userCheck.rows.length > 0) {
-      return res.status(409).json({ success: false, error: { code: 'EMAIL_EXISTS', message: 'Bu e-posta zaten kayıtlı.' } });
+      console.log(`[Auth Register] Email already exists in DB: ${maskEmail(normalizedEmail)}`);
+      return res.status(409).json({ 
+        success: false, 
+        error: { code: 'EMAIL_EXISTS', message: 'Bu e-posta zaten kayıtlı.' } 
+      });
     }
 
     const password_hash = await bcrypt.hash(password, 10);
-    const derivedUsername = username || email.split('@')[0];
-    
+    const derivedUsername = (username && username.trim()) || normalizedEmail.split('@')[0];
+    const cleanPhone = phone && phone.trim() ? phone.trim() : null;
+    const parsedAge = age ? parseInt(age) : null;
+    const cleanGender = gender && gender.trim() ? gender.trim() : null;
+    const isNotifications = notifications_enabled !== undefined ? Boolean(notifications_enabled) : true;
+    const cleanAvatar = avatar_url && avatar_url.trim() ? avatar_url.trim() : null;
+
     const result = await db.query(
       `INSERT INTO users (email, password_hash, username, full_name, phone, age, gender, notifications_enabled, avatar_url, role, account_status) 
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'user', 'active') 
        RETURNING id, email, username, full_name, role, avatar_url`,
-      [email, password_hash, derivedUsername, derivedUsername, phone || null, age ? parseInt(age) : null, gender || null, notifications_enabled !== undefined ? Boolean(notifications_enabled) : true, avatar_url || null]
+      [normalizedEmail, password_hash, derivedUsername, derivedUsername, cleanPhone, parsedAge, cleanGender, isNotifications, cleanAvatar]
     );
 
     const user = result.rows[0];
+    console.log(`[Auth Register] User successfully created: id=${user.id}`);
+
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role || 'user' }, 
       process.env.JWT_SECRET || 'supersecretjwtkey_12345', 
@@ -51,8 +81,15 @@ const register = async (req, res, next) => {
 
     res.status(201).json({ success: true, data: { user: userProfile, token } });
   } catch (error) {
+    console.error('[Auth Register] Error:', error);
     if (error.code === '23505') {
-      return res.status(409).json({ success: false, error: { code: 'EMAIL_EXISTS', message: 'Bu e-posta zaten kayıtlı.' } });
+      if (error.constraint === 'users_email_key' || error.detail?.includes('email')) {
+        return res.status(409).json({ success: false, error: { code: 'EMAIL_EXISTS', message: 'Bu e-posta zaten kayıtlı.' } });
+      }
+      if (error.constraint === 'users_phone_key' || error.detail?.includes('phone')) {
+        return res.status(409).json({ success: false, error: { code: 'PHONE_EXISTS', message: 'Bu telefon numarası zaten kayıtlı.' } });
+      }
+      return res.status(409).json({ success: false, error: { code: 'DUPLICATE_ENTRY', message: 'Bu bilgilerle daha önce kayıt yapılmış.' } });
     }
     next(error);
   }
@@ -66,7 +103,10 @@ const login = async (req, res, next) => {
       return res.status(400).json({ success: false, error: { code: 'MISSING_FIELDS', message: 'E-posta ve şifre zorunludur.' } });
     }
 
-    const result = await db.query('SELECT * FROM users WHERE email = $1 AND account_status = $2', [email, 'active']);
+    const normalizedEmail = email.trim().toLowerCase();
+    console.log(`[Auth Login] Login attempt for: ${maskEmail(normalizedEmail)}`);
+
+    const result = await db.query('SELECT * FROM users WHERE LOWER(email) = LOWER($1) AND account_status = $2', [normalizedEmail, 'active']);
     if (result.rows.length === 0) {
       return res.status(401).json({ success: false, error: { code: 'INVALID_CREDENTIALS', message: 'E-posta veya şifre hatalı.' } });
     }
@@ -119,7 +159,7 @@ const oauthLogin = async (req, res, next) => {
       return res.status(400).json({ success: false, error: { code: 'MISSING_FIELDS', message: 'Sağlayıcı ve token zorunludur.' } });
     }
 
-    let userEmail = email || null;
+    let userEmail = email ? email.trim().toLowerCase() : null;
     let userName = fullName || null;
     let userAvatar = null;
     let appleSub = null;
@@ -161,7 +201,7 @@ const oauthLogin = async (req, res, next) => {
       }
 
       appleSub = verifiedClaims.sub;
-      userEmail = verifiedClaims.email || userEmail || (appleSub ? `${appleSub}@privaterelay.appleid.com` : null);
+      userEmail = (verifiedClaims.email ? verifiedClaims.email.trim().toLowerCase() : null) || userEmail || (appleSub ? `${appleSub}@privaterelay.appleid.com` : null);
 
     } else if (provider === 'google') {
       const googleAudiences = [
@@ -180,7 +220,6 @@ const oauthLogin = async (req, res, next) => {
         payload = ticket.getPayload();
       } catch (err) {
         console.error('Google verifyIdToken error:', err.message);
-        // Fallback for diagnostic verification
         try {
           const decoded = jwt.decode(oauthToken);
           if (decoded && (decoded.iss?.includes('accounts.google.com') || decoded.email)) {
@@ -194,7 +233,7 @@ const oauthLogin = async (req, res, next) => {
       }
 
       googleSub = payload.sub;
-      userEmail = payload.email || userEmail;
+      userEmail = payload.email ? payload.email.trim().toLowerCase() : userEmail;
       userName = payload.name || userName;
       userAvatar = payload.picture || null;
 
@@ -229,7 +268,7 @@ const oauthLogin = async (req, res, next) => {
     }
 
     if (!user && userEmail) {
-      const emailRes = await db.query('SELECT * FROM users WHERE email = $1 AND account_status = $2', [userEmail, 'active']);
+      const emailRes = await db.query('SELECT * FROM users WHERE LOWER(email) = LOWER($1) AND account_status = $2', [userEmail, 'active']);
       if (emailRes.rows.length > 0) {
         user = emailRes.rows[0];
       }
