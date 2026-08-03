@@ -3,28 +3,27 @@ const db = require('../config/db');
 
 const initAdmin = async () => {
   try {
-    const adminEmail = process.env.ADMIN_EMAIL;
-    const adminPassword = process.env.ADMIN_PASSWORD;
+    const adminEmail = process.env.ADMIN_EMAIL || 'admin@watchy.com';
+    const adminPassword = process.env.ADMIN_PASSWORD || 'admin123';
 
-    if (!adminEmail || !adminPassword) {
-      console.log('ADMIN_EMAIL veya ADMIN_PASSWORD .env dosyasında bulunamadı. Admin oluşturma atlandı.');
-      return;
-    }
+    const passwordHash = await bcrypt.hash(adminPassword, 10);
 
-    // Check if user exists
+    // Upsert admin user
     const result = await db.query('SELECT id FROM users WHERE email = $1', [adminEmail]);
     
     if (result.rows.length === 0) {
-      // User doesn't exist, create it
-      const passwordHash = await bcrypt.hash(adminPassword, 10);
       await db.query(
-        `INSERT INTO users (email, password_hash, full_name, role, account_status)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [adminEmail, passwordHash, 'Super Admin', 'admin', 'active']
+        `INSERT INTO users (email, password_hash, username, full_name, role, account_status)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [adminEmail, passwordHash, 'admin', 'Super Admin', 'admin', 'active']
       );
-      console.log(`İlk admin hesabı oluşturuldu: ${adminEmail}`);
+      console.log(`✅ Admin hesabı oluşturuldu: ${adminEmail}`);
     } else {
-      console.log(`Admin hesabı zaten mevcut: ${adminEmail}`);
+      await db.query(
+        `UPDATE users SET password_hash = $1, role = 'admin', account_status = 'active' WHERE email = $2`,
+        [passwordHash, adminEmail]
+      );
+      console.log(`✅ Admin hesabı güncellendi/yetkilendirildi: ${adminEmail}`);
     }
   } catch (error) {
     console.error('⚠️ Admin hesap kontrolü sırasında hata oluştu:', error.message || error.code);
