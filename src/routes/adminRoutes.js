@@ -58,6 +58,7 @@ router.put('/subscriptions/:id', adminController.updateSubscription);
 // Notifications
 router.get('/notifications', adminController.getNotifications);
 router.post('/notifications', adminController.createNotification);
+router.put('/notifications/:id', adminController.updateNotification);
 router.delete('/notifications/:id', adminController.deleteNotification);
 
 // User Subscriptions (Admin managed)

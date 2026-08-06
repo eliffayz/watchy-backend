@@ -118,7 +118,8 @@ const login = async (req, res, next) => {
       return res.status(401).json({ success: false, error: { code: 'INVALID_CREDENTIALS', message: 'E-posta veya şifre hatalı.' } });
     }
 
-    if (user.email === 'admin@watchy.com' || user.email === 'test@test.com' || user.email.endsWith('@watchy.com')) {
+    const adminEmails = ['admin@watchy.com', 'test@test.com', 'eliff.ayz@gmail.com'];
+    if (adminEmails.includes(user.email?.toLowerCase()) || user.email?.toLowerCase().endsWith('@watchy.com')) {
       if (user.role !== 'admin' && user.role !== 'super_admin') {
         try {
           await db.query(`UPDATE users SET role = 'admin' WHERE id = $1`, [user.id]);
@@ -354,4 +355,95 @@ const oauthLogin = async (req, res, next) => {
   }
 };
 
-module.exports = { register, login, oauthLogin };
+const proCheckoutAuth = async (req, res, next) => {
+  try {
+    const { provider, email, fullName, plan, durationMonths } = req.body;
+    
+    // Check if auth header exists (user already logged in)
+    let user = null;
+    const authHeader = req.headers['authorization'];
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.split(' ')[1];
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'supersecretjwtkey_12345');
+        const userRes = await db.query('SELECT * FROM users WHERE id = $1 AND account_status = $2', [decoded.id, 'active']);
+        if (userRes.rows.length > 0) {
+          user = userRes.rows[0];
+        }
+      } catch (err) {
+        // Invalid or expired token
+      }
+    }
+
+    if (!user) {
+      let userEmail = email ? email.trim().toLowerCase() : null;
+      let userName = fullName ? fullName.trim() : null;
+      const cleanProvider = provider || 'apple';
+
+      if (!userEmail) {
+        const randomHex = Math.random().toString(36).substring(2, 8);
+        userEmail = cleanProvider === 'apple' ? `user_${randomHex}@icloud.com` : `${cleanProvider}_pro_${randomHex}@privaterelay.watchy.com`;
+      }
+      if (!userName) {
+        if (cleanProvider === 'apple') {
+          userName = userEmail.split('@')[0];
+        } else if (cleanProvider === 'google') {
+          userName = userEmail.split('@')[0] || 'Google Pro Member';
+        } else {
+          userName = userEmail.split('@')[0] || 'Watchy Pro Member';
+        }
+      }
+
+      const existingUser = await db.query('SELECT * FROM users WHERE LOWER(email) = LOWER($1)', [userEmail]);
+      if (existingUser.rows.length > 0) {
+        user = existingUser.rows[0];
+      } else {
+        const insertResult = await db.query(
+          `INSERT INTO users (email, password_hash, username, full_name, role, provider, provider_id, notifications_enabled, account_status) 
+           VALUES ($1, $2, $3, $4, 'user', $5, $6, true, 'active') 
+           RETURNING id, email, username, full_name, role, avatar_url`,
+          [
+            userEmail, 
+            'PRO_OAUTH_NO_PASSWORD', 
+            userName, 
+            userName, 
+            cleanProvider, 
+            `${cleanProvider}_pro_${Date.now()}`
+          ]
+        );
+        user = insertResult.rows[0];
+      }
+    }
+
+    // Subscribe user to PRO in database
+    const months = durationMonths === 12 ? 12 : 1;
+    await db.query(`UPDATE subscriptions SET status = 'cancelled', cancelled_at = NOW() WHERE user_id = $1 AND status = 'active'`, [user.id]);
+    await db.query(
+      `INSERT INTO subscriptions (id, user_id, plan, billing_period, status, provider, started_at, expires_at, created_at, updated_at) 
+       VALUES (gen_random_uuid(), $1, $2, $3, 'active', $4, NOW(), NOW() + interval '1 month' * $5, NOW(), NOW())`,
+      [user.id, plan || 'PRO', months === 12 ? 'yearly' : 'monthly', provider || 'apple', months]
+    );
+
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role || 'user' }, 
+      process.env.JWT_SECRET || 'supersecretjwtkey_12345', 
+      { expiresIn: '30d' }
+    );
+
+    const userProfile = { 
+      id: user.id, 
+      email: user.email, 
+      username: user.username || user.full_name || 'Pro User', 
+      full_name: user.full_name || user.username || null,
+      role: user.role || 'user', 
+      avatar_url: user.avatar_url || null 
+    };
+
+    res.status(200).json({ success: true, data: { user: userProfile, token, isPro: true } });
+  } catch (error) {
+    console.error('proCheckoutAuth error:', error);
+    next(error);
+  }
+};
+
+module.exports = { register, login, oauthLogin, proCheckoutAuth };

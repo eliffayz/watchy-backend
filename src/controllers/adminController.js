@@ -211,7 +211,7 @@ const createSeries = async (req, res, next) => {
     const result = await db.query(
       `INSERT INTO series (title, slug, description, short_description, poster_url, banner_url, trailer_url, language, country, release_year, age_rating, status, featured, premium, free_episode_count, seasons_count)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) RETURNING *`,
-      [title, finalSlug, description, short_description, poster_url, banner_url, trailer_url, language, country, release_year, age_rating, status || 'draft', featured || false, premium || false, free_episode_count || 4, seasons_count || 1]
+      [title, finalSlug, description, short_description, poster_url, banner_url, trailer_url, language, country, release_year, age_rating, status || 'published', featured || false, premium || false, free_episode_count || 4, seasons_count || 1]
     );
 
     const newSeries = result.rows[0];
@@ -329,24 +329,49 @@ const getEpisodeById = async (req, res, next) => {
 
 const createEpisode = async (req, res, next) => {
   try {
-    const { series_id, season_number, episode_number, title, description, thumbnail_url, video_url, duration_seconds, status, premium, published_at } = req.body;
+    let { series_id, season_number, episode_number, title, description, thumbnail_url, video_url, duration_seconds, status, premium, published_at } = req.body;
     
-    if (!series_id || !title || episode_number === undefined) {
-      return res.status(400).json({ success: false, message: 'series_id, title and episode_number are required' });
+    if (!series_id) {
+      return res.status(400).json({ success: false, message: 'series_id is required' });
     }
 
-    if (!video_url) {
-      return res.status(400).json({ success: false, message: 'Video URL boş olamaz. Lütfen geçerli bir video bağlantısı sağlayın.' });
+    season_number = season_number || 1;
+
+    if (episode_number === undefined || episode_number === null || episode_number === '') {
+      const maxEpRes = await db.query(
+        'SELECT COALESCE(MAX(episode_number), 0) as max_ep FROM episodes WHERE series_id = $1 AND season_number = $2',
+        [series_id, season_number]
+      );
+      episode_number = Number(maxEpRes.rows[0].max_ep) + 1;
+    } else {
+      episode_number = Number(episode_number);
     }
 
-    // check unique season_number, episode_number per series
-    const uniqueCheck = await db.query('SELECT id FROM episodes WHERE series_id = $1 AND season_number = $2 AND episode_number = $3', [series_id, season_number || 1, episode_number]);
-    if (uniqueCheck.rows.length > 0) return res.status(409).json({ success: false, message: 'This episode number already exists for the season.' });
+    if (!title || !title.trim()) {
+      title = `Episode ${episode_number}`;
+    }
+
+    if (!video_url || typeof video_url !== 'string') {
+      video_url = '';
+    }
+
+    // If episode already exists, calculate next available episode number
+    const uniqueCheck = await db.query(
+      'SELECT id FROM episodes WHERE series_id = $1 AND season_number = $2 AND episode_number = $3',
+      [series_id, season_number, episode_number]
+    );
+    if (uniqueCheck.rows.length > 0) {
+      const maxEpRes = await db.query(
+        'SELECT COALESCE(MAX(episode_number), 0) as max_ep FROM episodes WHERE series_id = $1 AND season_number = $2',
+        [series_id, season_number]
+      );
+      episode_number = Number(maxEpRes.rows[0].max_ep) + 1;
+    }
 
     const result = await db.query(
       `INSERT INTO episodes (series_id, season_number, episode_number, title, description, thumbnail_url, video_url, duration_seconds, status, premium, published_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
-      [series_id, season_number || 1, episode_number, title, description, thumbnail_url, video_url, duration_seconds, status || 'draft', premium || false, published_at]
+      [series_id, season_number, episode_number, title, description || '', thumbnail_url || '', video_url, duration_seconds || 0, status || 'published', premium || false, published_at || null]
     );
 
     const newEp = result.rows[0];
@@ -426,14 +451,14 @@ const getBanners = async (req, res, next) => {
 
 const createBanner = async (req, res, next) => {
   try {
-    const { title, subtitle, image_url, series_id, button_text, sort_order, active, starts_at, ends_at } = req.body;
+    let { title, subtitle, image_url, mobile_image_url, series_id, button_text, sort_order, active, starts_at, ends_at } = req.body;
     
-    if (!image_url) return res.status(400).json({ success: false, message: 'image_url is required' });
+    image_url = image_url || mobile_image_url || '';
 
     const result = await db.query(
       `INSERT INTO banners (title, subtitle, image_url, series_id, button_text, sort_order, active, starts_at, ends_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [title, subtitle, image_url, series_id || null, button_text, sort_order || 0, active ?? true, starts_at, ends_at]
+      [title || 'Featured Banner', subtitle || '', image_url, series_id || null, button_text || 'Watch Now', sort_order || 0, active ?? true, starts_at || null, ends_at || null]
     );
 
     const newBanner = result.rows[0];
@@ -506,14 +531,80 @@ const getUsers = async (req, res, next) => {
 
 const getUserById = async (req, res, next) => {
   try {
-    const result = await db.query(`
+    const userRes = await db.query(`
       SELECT u.id, u.email, u.phone, u.username, u.age, u.gender, u.avatar_url, u.role, u.account_status, u.created_at, u.updated_at, u.selected_genres,
       (CASE WHEN EXISTS (SELECT 1 FROM subscriptions s WHERE s.user_id = u.id AND s.status = 'active') THEN 'active' ELSE 'inactive' END) as subscription_status,
       COALESCE((SELECT json_agg(s.*) FROM subscriptions s WHERE s.user_id = u.id), '[]'::json) as subscriptions
       FROM users u WHERE u.id = $1
     `, [req.params.id]);
-    if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'User not found' });
-    res.json({ success: true, data: result.rows[0] });
+    
+    if (userRes.rows.length === 0) return res.status(404).json({ success: false, message: 'User not found' });
+    
+    const user = userRes.rows[0];
+
+    // Safely query favorites
+    try {
+      const favRes = await db.query(`
+        SELECT f.series_id, f.created_at as favorited_at, s.title, s.poster_url, s.banner_url, s.release_year, s.rating
+        FROM favorites f
+        JOIN series s ON f.series_id = s.id
+        WHERE f.user_id = $1
+        ORDER BY f.created_at DESC
+      `, [req.params.id]);
+      user.favorites = favRes.rows;
+    } catch (e) {
+      user.favorites = [];
+    }
+
+    // Safely query saved_items
+    try {
+      const savedRes = await db.query(`
+        SELECT si.id, si.series_id, si.episode_id, COALESCE(e.title, s.title, si.title) as title, s.title as series_title,
+               COALESCE(e.thumbnail_url, s.poster_url) as poster_url, si.created_at as saved_at
+        FROM saved_items si
+        LEFT JOIN series s ON si.series_id = s.id
+        LEFT JOIN episodes e ON si.episode_id = e.id
+        WHERE si.user_id = $1
+        ORDER BY si.created_at DESC
+      `, [req.params.id]);
+      user.saved_items = savedRes.rows;
+    } catch (e) {
+      user.saved_items = [];
+    }
+
+    // Safely query downloads
+    try {
+      const downRes = await db.query(`
+        SELECT d.id, d.series_id, d.episode_id, COALESCE(e.title, s.title, d.title) as title, s.title as series_title,
+               COALESCE(e.thumbnail_url, s.poster_url) as poster_url, d.created_at as downloaded_at
+        FROM downloads d
+        LEFT JOIN series s ON d.series_id = s.id
+        LEFT JOIN episodes e ON d.episode_id = e.id
+        WHERE d.user_id = $1
+        ORDER BY d.created_at DESC
+      `, [req.params.id]);
+      user.downloads = downRes.rows;
+    } catch (e) {
+      user.downloads = [];
+    }
+
+    // Safely query watch_history
+    try {
+      const histRes = await db.query(`
+        SELECT wh.episode_id, e.title as episode_title, s.id as series_id, s.title as series_title,
+               COALESCE(e.thumbnail_url, s.poster_url) as poster_url, wh.progress_seconds, wh.completed, wh.last_watched_at
+        FROM watch_history wh
+        JOIN episodes e ON wh.episode_id = e.id
+        JOIN series s ON e.series_id = s.id
+        WHERE wh.user_id = $1
+        ORDER BY wh.last_watched_at DESC
+      `, [req.params.id]);
+      user.watch_history = histRes.rows;
+    } catch (e) {
+      user.watch_history = [];
+    }
+
+    res.json({ success: true, data: user });
   } catch (error) {
     console.error(error);
     console.error(error.stack);
@@ -577,8 +668,8 @@ const uploadFile = async (req, res, next) => {
     if (!req.file) {
       return res.status(400).json({ success: false, message: 'No file uploaded' });
     }
-    // Return the URL that can be used to access the file
-    const fileUrl = `${process.env.VITE_API_URL || 'http://localhost:3000'}/uploads/${req.file.filename}`;
+    // Return relative URL so it can be served across web and mobile seamlessly
+    const fileUrl = `/uploads/${req.file.filename}`;
     res.status(200).json({ success: true, data: { url: fileUrl } });
   } catch (error) {
     console.error('File upload error:', error);
@@ -660,20 +751,104 @@ const getNotifications = async (req, res, next) => {
 
 const createNotification = async (req, res, next) => {
   try {
-    const { user_id, title, message, type, target_url } = req.body;
+    const { user_id, title, message, body, type, target_url, target, scheduled_at, status } = req.body;
+    const finalMsg = message || body;
     
-    if (!title || !message) return res.status(400).json({ success: false, message: 'Title and message are required' });
+    if (!title || !finalMsg) return res.status(400).json({ success: false, message: 'Title and message are required' });
 
-    const result = await db.query(
-      `INSERT INTO notifications (user_id, title, message, type, target_url)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [user_id || null, title, message, type || 'general', target_url || null]
-    );
+    const finalTarget = target_url || target || null;
+    const finalStatus = status === 'draft' ? 'draft' : (scheduled_at ? 'scheduled' : (status || 'sent'));
+    const sentAt = finalStatus === 'sent' ? new Date().toISOString() : null;
 
-    const newNotif = result.rows[0];
-    await logAdminAction(req.user.id, 'CREATE', 'notification', newNotif.id, { title });
+    let newNotif;
+    try {
+      const result = await db.query(
+        `INSERT INTO notifications (user_id, title, message, body, type, target_url, target, scheduled_at, status, sent_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+        [user_id || null, title, finalMsg, finalMsg, type || 'general', finalTarget, finalTarget, scheduled_at || null, finalStatus, sentAt]
+      );
+      newNotif = result.rows[0];
+    } catch (e1) {
+      console.warn('[Notifications] Full insert fallback:', e1.message);
+      try {
+        const result = await db.query(
+          `INSERT INTO notifications (user_id, title, message, type, status, sent_at)
+           VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+          [user_id || null, title, finalMsg, type || 'general', finalStatus, sentAt]
+        );
+        newNotif = result.rows[0];
+      } catch (e2) {
+        const result = await db.query(
+          `INSERT INTO notifications (user_id, title, message, type)
+           VALUES ($1, $2, $3, $4) RETURNING *`,
+          [user_id || null, title, finalMsg, type || 'general']
+        );
+        newNotif = result.rows[0];
+      }
+    }
+
+    try {
+      await logAdminAction(req.user.id, 'CREATE', 'notification', newNotif.id, { title });
+    } catch (eLog) {
+      console.warn('[Notifications] Log warning:', eLog.message);
+    }
     
     res.status(201).json({ success: true, data: newNotif });
+  } catch (error) {
+    console.error(error);
+    console.error(error.stack);
+    next(error);
+  }
+};
+
+const updateNotification = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { title, message, body, type, target_url, target, scheduled_at, status, sent_at } = req.body;
+    const finalMsg = message || body;
+
+    let updatedNotif;
+    try {
+      const updates = [];
+      const values = [];
+      let idx = 1;
+
+      if (title !== undefined) { updates.push(`title = $${idx++}`); values.push(title); }
+      if (finalMsg !== undefined) { 
+        updates.push(`message = $${idx++}`); values.push(finalMsg); 
+      }
+      if (type !== undefined) { updates.push(`type = $${idx++}`); values.push(type); }
+      if (target_url !== undefined || target !== undefined) {
+        const tgt = target_url || target;
+        updates.push(`target_url = $${idx++}`); values.push(tgt);
+      }
+      if (scheduled_at !== undefined) { updates.push(`scheduled_at = $${idx++}`); values.push(scheduled_at); }
+      if (status !== undefined) { 
+        updates.push(`status = $${idx++}`); values.push(status);
+        if (status === 'sent') {
+          updates.push(`sent_at = NOW()`);
+        }
+      }
+      if (sent_at !== undefined) { updates.push(`sent_at = $${idx++}`); values.push(sent_at); }
+
+      if (updates.length > 0) {
+        values.push(id);
+        const result = await db.query(
+          `UPDATE notifications SET ${updates.join(', ')} WHERE id = $${idx} RETURNING *`,
+          values
+        );
+        updatedNotif = result.rows[0];
+      } else {
+        const result = await db.query('SELECT * FROM notifications WHERE id = $1', [id]);
+        updatedNotif = result.rows[0];
+      }
+    } catch (eUp) {
+      console.warn('[Notifications] Update fallback:', eUp.message);
+      const result = await db.query('SELECT * FROM notifications WHERE id = $1', [id]);
+      updatedNotif = result.rows[0];
+    }
+
+    res.json({ success: true, data: updatedNotif });
   } catch (error) {
     console.error(error);
     console.error(error.stack);
@@ -687,7 +862,11 @@ const deleteNotification = async (req, res, next) => {
     const result = await db.query('DELETE FROM notifications WHERE id = $1 RETURNING *', [id]);
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Not found' });
     
-    await logAdminAction(req.user.id, 'DELETE', 'notification', id, { title: result.rows[0].title });
+    try {
+      await logAdminAction(req.user.id, 'DELETE', 'notification', id, { title: result.rows[0].title });
+    } catch (eLog) {
+      console.warn('[Notifications] Delete log warning:', eLog.message);
+    }
     res.json({ success: true, message: 'Notification deleted' });
   } catch (error) {
     console.error(error);
@@ -707,6 +886,7 @@ module.exports = {
   getSubscriptions, getSubscriptionById, updateSubscription,
   getNotifications,
   createNotification,
+  updateNotification,
   deleteNotification,
   updateUserSubscription,
   uploadFile

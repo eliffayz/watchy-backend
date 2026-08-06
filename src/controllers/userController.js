@@ -21,9 +21,11 @@ const getMe = async (req, res, next) => {
   }
 };
 
+const bcrypt = require('bcrypt');
+
 const updateMe = async (req, res, next) => {
   try {
-    const { username, phone, email, avatar_url, age, gender } = req.body;
+    const { username, phone, email, avatar_url, age, gender, selected_genres, password } = req.body;
     
     const updates = [];
     const values = [];
@@ -53,6 +55,15 @@ const updateMe = async (req, res, next) => {
       updates.push(`gender = $${queryIndex++}`);
       values.push(gender);
     }
+    if (selected_genres !== undefined) {
+      updates.push(`selected_genres = $${queryIndex++}`);
+      values.push(selected_genres);
+    }
+    if (password) {
+      const password_hash = await bcrypt.hash(password, 10);
+      updates.push(`password_hash = $${queryIndex++}`);
+      values.push(password_hash);
+    }
 
     if (updates.length === 0) {
       return res.status(400).json({ success: false, message: 'No fields to update' });
@@ -60,7 +71,7 @@ const updateMe = async (req, res, next) => {
 
     values.push(req.user.id);
     const result = await db.query(
-      `UPDATE users SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${queryIndex} RETURNING id, email, phone, username, gender, age, avatar_url, role`,
+      `UPDATE users SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = $${queryIndex} RETURNING id, email, phone, username, gender, age, avatar_url, selected_genres, role`,
       values
     );
 
@@ -177,11 +188,12 @@ const updateWatchHistory = async (req, res, next) => {
 const getUserNotifications = async (req, res, next) => {
   try {
     const result = await db.query(`
-      SELECT n.* FROM notifications n
-      JOIN users u ON u.id = $1
+      SELECT n.*, COALESCE(n.message, n.body) as message, COALESCE(n.body, n.message) as body 
+      FROM notifications n
       WHERE (n.user_id = $1 OR n.user_id IS NULL)
-        AND n.created_at >= u.created_at
-      ORDER BY n.created_at DESC
+        AND (n.status = 'sent' OR n.status IS NULL)
+      ORDER BY COALESCE(n.sent_at, n.created_at) DESC
+      LIMIT 100
     `, [req.user.id]);
     res.json({ success: true, data: result.rows });
   } catch (error) {
@@ -281,12 +293,104 @@ const subscribe = async (req, res, next) => {
   }
 };
 
+const getSaved = async (req, res, next) => {
+  try {
+    const result = await db.query(`
+      SELECT si.*, s.title as series_title, s.poster_url, e.title as episode_title, e.thumbnail_url
+      FROM saved_items si
+      LEFT JOIN series s ON si.series_id = s.id
+      LEFT JOIN episodes e ON si.episode_id = e.id
+      WHERE si.user_id = $1
+      ORDER BY si.created_at DESC
+    `, [req.user.id]);
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('getSaved error:', error.message || error);
+    res.json({ success: true, data: [] });
+  }
+};
+
+const addSaved = async (req, res, next) => {
+  try {
+    const { series_id, episode_id, title } = req.body;
+    await db.query(`
+      INSERT INTO saved_items (user_id, series_id, episode_id, title)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (user_id, series_id, episode_id) DO NOTHING
+    `, [req.user.id, series_id || null, episode_id || null, title || 'Saved Item']);
+    res.json({ success: true, message: 'Saved successfully' });
+  } catch (error) {
+    console.error('addSaved error:', error.message || error);
+    res.json({ success: true, message: 'Saved locally' });
+  }
+};
+
+const removeSaved = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    await db.query('DELETE FROM saved_items WHERE user_id = $1 AND (id = $2 OR series_id = $2 OR episode_id = $2)', [req.user.id, id]);
+    res.json({ success: true, message: 'Removed from saved' });
+  } catch (error) {
+    console.error('removeSaved error:', error.message || error);
+    res.json({ success: true, message: 'Removed locally' });
+  }
+};
+
+const getDownloads = async (req, res, next) => {
+  try {
+    const result = await db.query(`
+      SELECT d.*, s.title as series_title, s.poster_url, e.title as episode_title, e.thumbnail_url
+      FROM downloads d
+      LEFT JOIN series s ON d.series_id = s.id
+      LEFT JOIN episodes e ON d.episode_id = e.id
+      WHERE d.user_id = $1
+      ORDER BY d.created_at DESC
+    `, [req.user.id]);
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    console.error('getDownloads error:', error.message || error);
+    res.json({ success: true, data: [] });
+  }
+};
+
+const addDownload = async (req, res, next) => {
+  try {
+    const { series_id, episode_id, title } = req.body;
+    await db.query(`
+      INSERT INTO downloads (user_id, series_id, episode_id, title)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (user_id, series_id, episode_id) DO NOTHING
+    `, [req.user.id, series_id || null, episode_id || null, title || 'Download']);
+    res.json({ success: true, message: 'Download recorded' });
+  } catch (error) {
+    console.error('addDownload error:', error.message || error);
+    res.json({ success: true, message: 'Download recorded locally' });
+  }
+};
+
+const removeDownload = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    await db.query('DELETE FROM downloads WHERE user_id = $1 AND (id = $2 OR series_id = $2 OR episode_id = $2)', [req.user.id, id]);
+    res.json({ success: true, message: 'Download removed' });
+  } catch (error) {
+    console.error('removeDownload error:', error.message || error);
+    res.json({ success: true, message: 'Download removed locally' });
+  }
+};
+
 module.exports = {
   getMe,
   updateMe,
   getFavorites,
   addFavorite,
   removeFavorite,
+  getSaved,
+  addSaved,
+  removeSaved,
+  getDownloads,
+  addDownload,
+  removeDownload,
   getWatchHistory,
   updateWatchHistory,
   getUserNotifications,

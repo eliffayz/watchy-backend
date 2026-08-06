@@ -14,5 +14,6 @@ router.get('/categories/:id/series', categoryController.getSeriesByCategory);
 
 router.get('/banners', publicController.getBanners);
 router.get('/episodes/:id', publicController.getEpisodeById);
+router.get('/notifications', publicController.getNotifications);
 
 module.exports = router;

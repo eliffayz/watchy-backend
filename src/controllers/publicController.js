@@ -4,46 +4,12 @@ const db = require('../config/db');
 const getSeries = async (req, res, next) => {
   try {
     const { featured, category, language, search } = req.query;
-    let query = 'SELECT s.* FROM series s WHERE s.status = $1';
-    let params = ['published'];
-    let paramCount = 1;
 
-    if (featured === 'true') {
-      paramCount++;
-      query += ` AND s.featured = $${paramCount}`;
-      params.push(true);
-    }
-
-    if (language) {
-      paramCount++;
-      query += ` AND s.language = $${paramCount}`;
-      params.push(language);
-    }
-
-    if (search) {
-      paramCount++;
-      query += ` AND s.title ILIKE $${paramCount}`;
-      params.push(`%${search}%`);
-    }
-
-    if (category) {
-      // join with series_categories and categories
-      query = `SELECT s.* FROM series s 
-               JOIN series_categories sc ON s.id = sc.series_id 
-               JOIN categories c ON sc.category_id = c.id 
-               WHERE s.status = $1 AND c.slug = $2`;
-      params = ['published', category];
-      paramCount = 2;
-      // We'd have to re-apply the other filters if category is present, 
-      // but for simplicity, let's just do a clean builder
-    }
-
-    // A better query builder logic:
     let q = 'SELECT DISTINCT s.* FROM series s';
     const joins = [];
-    const wheres = ['s.status = $1'];
-    const vals = ['published'];
-    let count = 1;
+    const wheres = ["(s.status != 'archived' OR s.status IS NULL)"];
+    const vals = [];
+    let count = 0;
 
     if (category) {
       joins.push('JOIN series_categories sc ON s.id = sc.series_id');
@@ -82,7 +48,7 @@ const getSeries = async (req, res, next) => {
 const getSeriesById = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const result = await db.query('SELECT * FROM series WHERE id = $1 AND status = $2', [id, 'published']);
+    const result = await db.query("SELECT * FROM series WHERE id = $1 AND (status != 'archived' OR status IS NULL)", [id]);
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Series not found' });
     res.json({ success: true, data: result.rows[0] });
   } catch (error) {
@@ -94,8 +60,8 @@ const getEpisodesBySeriesId = async (req, res, next) => {
   try {
     const { id } = req.params;
     const result = await db.query(
-      'SELECT * FROM episodes WHERE series_id = $1 AND status = $2 ORDER BY season_number ASC, episode_number ASC', 
-      [id, 'published']
+      "SELECT * FROM episodes WHERE series_id = $1 AND (status != 'archived' OR status IS NULL) ORDER BY season_number ASC, episode_number ASC", 
+      [id]
     );
     res.json({ success: true, data: result.rows });
   } catch (error) {
@@ -106,7 +72,7 @@ const getEpisodesBySeriesId = async (req, res, next) => {
 // Categories
 const getCategories = async (req, res, next) => {
   try {
-    const result = await db.query('SELECT * FROM categories WHERE active = true ORDER BY sort_order ASC');
+    const result = await db.query('SELECT * FROM categories WHERE active = true OR active IS NULL ORDER BY sort_order ASC');
     res.json({ success: true, data: result.rows });
   } catch (error) {
     next(error);
@@ -119,8 +85,9 @@ const getSeriesByCategory = async (req, res, next) => {
     const result = await db.query(`
       SELECT s.* FROM series s
       JOIN series_categories sc ON s.id = sc.series_id
-      WHERE sc.category_id = $1 AND s.status = $2
-    `, [id, 'published']);
+      WHERE sc.category_id = $1 AND (s.status != 'archived' OR s.status IS NULL)
+      ORDER BY s.created_at DESC
+    `, [id]);
     res.json({ success: true, data: result.rows });
   } catch (error) {
     next(error);
@@ -132,7 +99,7 @@ const getBanners = async (req, res, next) => {
   try {
     const result = await db.query(`
       SELECT * FROM banners 
-      WHERE active = true 
+      WHERE (active = true OR active IS NULL)
       AND (starts_at IS NULL OR starts_at <= NOW())
       AND (ends_at IS NULL OR ends_at >= NOW())
       ORDER BY sort_order ASC
@@ -147,9 +114,26 @@ const getBanners = async (req, res, next) => {
 const getEpisodeById = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const result = await db.query('SELECT * FROM episodes WHERE id = $1 AND status = $2', [id, 'published']);
+    const result = await db.query("SELECT * FROM episodes WHERE id = $1 AND (status != 'archived' OR status IS NULL)", [id]);
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Episode not found' });
     res.json({ success: true, data: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Notifications (Public broadcast)
+const getNotifications = async (req, res, next) => {
+  try {
+    const result = await db.query(`
+      SELECT n.*, COALESCE(n.message, n.body) as message, COALESCE(n.body, n.message) as body
+      FROM notifications n
+      WHERE n.user_id IS NULL
+        AND (n.status = 'sent' OR n.status IS NULL)
+      ORDER BY COALESCE(n.sent_at, n.created_at) DESC
+      LIMIT 50
+    `);
+    res.json({ success: true, data: result.rows });
   } catch (error) {
     next(error);
   }
@@ -162,5 +146,6 @@ module.exports = {
   getCategories,
   getSeriesByCategory,
   getBanners,
-  getEpisodeById
+  getEpisodeById,
+  getNotifications
 };
