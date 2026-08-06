@@ -801,7 +801,17 @@ const createNotification = async (req, res, next) => {
     await ensureNotificationSchema();
 
     const finalTarget = target_url || target || null;
-    const finalStatus = status === 'draft' ? 'draft' : (scheduled_at ? 'scheduled' : (status || 'sent'));
+    let finalStatus = 'sent';
+    if (status === 'draft') {
+      finalStatus = 'draft';
+    } else if (status === 'scheduled') {
+      finalStatus = 'scheduled';
+    } else if (status === 'sent') {
+      finalStatus = 'sent';
+    } else if (scheduled_at && new Date(scheduled_at) > new Date()) {
+      finalStatus = 'scheduled';
+    }
+
     const sentAt = finalStatus === 'sent' ? new Date().toISOString() : null;
 
     let newNotif = null;

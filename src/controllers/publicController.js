@@ -128,9 +128,9 @@ const getNotifications = async (req, res, next) => {
     const result = await db.query(`
       SELECT n.*, COALESCE(n.message, n.body) as message, COALESCE(n.body, n.message) as body
       FROM notifications n
-      WHERE n.user_id IS NULL
-        AND (n.status = 'sent' OR n.status IS NULL)
-      ORDER BY COALESCE(n.sent_at, n.created_at) DESC
+      WHERE (n.status = 'sent' OR n.status IS NULL OR (n.scheduled_at IS NOT NULL AND n.scheduled_at <= NOW()))
+        AND (n.status != 'draft' OR n.status IS NULL)
+      ORDER BY COALESCE(n.sent_at, n.scheduled_at, n.created_at) DESC
       LIMIT 50
     `);
     res.json({ success: true, data: result.rows });
