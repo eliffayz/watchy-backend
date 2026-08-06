@@ -14,16 +14,16 @@ console.log('IS_DOCKER:', process.env.IS_DOCKER);
 console.log('DATABASE_URL:', process.env.DATABASE_URL);
 console.log('connectionString resolved to:', connectionString);
 
-const isSupabase = connectionString && connectionString.includes('supabase');
+const isLocal = !connectionString || connectionString.includes('localhost') || connectionString.includes('127.0.0.1') || connectionString.includes('@postgres:');
+const useSSL = !isLocal || (connectionString && (connectionString.includes('sslmode=require') || connectionString.includes('supabase') || connectionString.includes('rlwy.net')));
 
 const pool = new Pool({
   connectionString,
-  ...(isSupabase && { ssl: { rejectUnauthorized: false } })
+  ...(useSSL && { ssl: { rejectUnauthorized: false } })
 });
 
 pool.on('error', (err, client) => {
   console.error('Unexpected error on idle client', err);
-  process.exit(-1);
 });
 
 module.exports = {

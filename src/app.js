@@ -43,11 +43,12 @@ app.use((err, req, res, next) => {
   console.error('[UNCAUGHT ERROR]:', err.stack || err);
   
   // Return standard JSON error format
-  res.status(500).json({ 
+  res.status(err.status || 500).json({ 
     success: false, 
+    message: err.message || 'Sunucu tarafında beklenmeyen bir hata oluştu.',
     error: {
-      code: 'INTERNAL_SERVER_ERROR',
-      message: 'Sunucu tarafında beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.'
+      code: err.code || 'INTERNAL_SERVER_ERROR',
+      message: err.message || 'Sunucu tarafında beklenmeyen bir hata oluştu. Lütfen tekrar deneyin.'
     }
   });
 });

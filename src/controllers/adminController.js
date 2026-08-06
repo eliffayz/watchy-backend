@@ -733,9 +733,50 @@ const updateSubscription = async (req, res, next) => {
   }
 };
 
+// Helper to ensure notification columns exist
+const ensureNotificationSchema = async () => {
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS notifications (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        message TEXT NOT NULL,
+        body TEXT,
+        type TEXT DEFAULT 'general',
+        target_url TEXT,
+        target TEXT,
+        scheduled_at TIMESTAMPTZ,
+        status TEXT DEFAULT 'sent',
+        sent_at TIMESTAMPTZ DEFAULT NOW(),
+        read BOOLEAN DEFAULT false,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      ALTER TABLE notifications ADD COLUMN IF NOT EXISTS body TEXT;
+      ALTER TABLE notifications ADD COLUMN IF NOT EXISTS target_url TEXT;
+      ALTER TABLE notifications ADD COLUMN IF NOT EXISTS target TEXT;
+      ALTER TABLE notifications ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ;
+      ALTER TABLE notifications ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'sent';
+      ALTER TABLE notifications ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ DEFAULT NOW();
+
+      CREATE TABLE IF NOT EXISTS push_tokens (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+        token TEXT UNIQUE NOT NULL,
+        platform TEXT DEFAULT 'ios',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
+  } catch (err) {
+    console.warn('[Notifications] Schema check warning:', err.message);
+  }
+};
+
 // --- NOTIFICATIONS ---
 const getNotifications = async (req, res, next) => {
   try {
+    await ensureNotificationSchema();
     const result = await db.query(`
       SELECT n.*, u.email as user_email 
       FROM notifications n 
@@ -757,11 +798,13 @@ const createNotification = async (req, res, next) => {
     
     if (!title || !finalMsg) return res.status(400).json({ success: false, message: 'Title and message are required' });
 
+    await ensureNotificationSchema();
+
     const finalTarget = target_url || target || null;
     const finalStatus = status === 'draft' ? 'draft' : (scheduled_at ? 'scheduled' : (status || 'sent'));
     const sentAt = finalStatus === 'sent' ? new Date().toISOString() : null;
 
-    let newNotif;
+    let newNotif = null;
     try {
       const result = await db.query(
         `INSERT INTO notifications (user_id, title, message, body, type, target_url, target, scheduled_at, status, sent_at)
@@ -779,6 +822,7 @@ const createNotification = async (req, res, next) => {
         );
         newNotif = result.rows[0];
       } catch (e2) {
+        console.warn('[Notifications] Minimal insert fallback:', e2.message);
         const result = await db.query(
           `INSERT INTO notifications (user_id, title, message, type)
            VALUES ($1, $2, $3, $4) RETURNING *`,
@@ -788,19 +832,25 @@ const createNotification = async (req, res, next) => {
       }
     }
 
-    try {
-      await logAdminAction(req.user.id, 'CREATE', 'notification', newNotif.id, { title });
-    } catch (eLog) {
-      console.warn('[Notifications] Log warning:', eLog.message);
+    if (!newNotif) {
+      return res.status(500).json({ success: false, message: 'Bildirim veritabanına eklenemedi.' });
+    }
+
+    if (req.user && req.user.id) {
+      try {
+        await logAdminAction(req.user.id, 'CREATE', 'notification', newNotif.id, { title });
+      } catch (eLog) {
+        console.warn('[Notifications] Log warning:', eLog.message);
+      }
     }
     
-    // Trigger push notification if status is 'sent'
+    // Trigger push notification asynchronously if status is 'sent'
     if (finalStatus === 'sent') {
       let audience = 'All Users';
       try {
         if (finalTarget) {
-          const parsed = JSON.parse(finalTarget);
-          if (parsed.audience) audience = parsed.audience;
+          const parsed = typeof finalTarget === 'string' ? JSON.parse(finalTarget) : finalTarget;
+          if (parsed && parsed.audience) audience = parsed.audience;
         }
       } catch (e) {}
 
@@ -819,8 +869,7 @@ const createNotification = async (req, res, next) => {
 
     res.status(201).json({ success: true, data: newNotif });
   } catch (error) {
-    console.error(error);
-    console.error(error.stack);
+    console.error('[createNotification Error]:', error);
     next(error);
   }
 };
@@ -830,6 +879,8 @@ const updateNotification = async (req, res, next) => {
     const { id } = req.params;
     const { title, message, body, type, target_url, target, scheduled_at, status, sent_at } = req.body;
     const finalMsg = message || body;
+
+    await ensureNotificationSchema();
 
     let updatedNotif;
     try {
@@ -873,13 +924,21 @@ const updateNotification = async (req, res, next) => {
       updatedNotif = result.rows[0];
     }
 
+    if (req.user && req.user.id && updatedNotif) {
+      try {
+        await logAdminAction(req.user.id, 'UPDATE', 'notification', id, { title: updatedNotif.title });
+      } catch (eLog) {
+        console.warn('[Notifications] Update log warning:', eLog.message);
+      }
+    }
+
     // Trigger push notification if status changed to 'sent'
     if (status === 'sent' && updatedNotif) {
       let audience = 'All Users';
       try {
         if (updatedNotif.target_url) {
-          const parsed = JSON.parse(updatedNotif.target_url);
-          if (parsed.audience) audience = parsed.audience;
+          const parsed = typeof updatedNotif.target_url === 'string' ? JSON.parse(updatedNotif.target_url) : updatedNotif.target_url;
+          if (parsed && parsed.audience) audience = parsed.audience;
         }
       } catch (e) {}
 
@@ -910,10 +969,12 @@ const deleteNotification = async (req, res, next) => {
     const result = await db.query('DELETE FROM notifications WHERE id = $1 RETURNING *', [id]);
     if (result.rows.length === 0) return res.status(404).json({ success: false, message: 'Not found' });
     
-    try {
-      await logAdminAction(req.user.id, 'DELETE', 'notification', id, { title: result.rows[0].title });
-    } catch (eLog) {
-      console.warn('[Notifications] Delete log warning:', eLog.message);
+    if (req.user && req.user.id) {
+      try {
+        await logAdminAction(req.user.id, 'DELETE', 'notification', id, { title: result.rows[0].title });
+      } catch (eLog) {
+        console.warn('[Notifications] Delete log warning:', eLog.message);
+      }
     }
     res.json({ success: true, message: 'Notification deleted' });
   } catch (error) {
