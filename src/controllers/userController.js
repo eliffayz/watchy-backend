@@ -379,6 +379,29 @@ const removeDownload = async (req, res, next) => {
   }
 };
 
+const registerPushToken = async (req, res, next) => {
+  try {
+    const { token, platform } = req.body;
+    const userId = req.user ? req.user.id : null;
+
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'Token is required' });
+    }
+
+    await db.query(`
+      INSERT INTO push_tokens (user_id, token, platform, updated_at)
+      VALUES ($1, $2, $3, NOW())
+      ON CONFLICT (token) 
+      DO UPDATE SET user_id = COALESCE($1, push_tokens.user_id), platform = COALESCE($3, push_tokens.platform), updated_at = NOW()
+    `, [userId, token, platform || 'ios']);
+
+    res.json({ success: true, message: 'Push token registered successfully' });
+  } catch (error) {
+    console.error('[PushToken User] Registration error:', error);
+    next(error);
+  }
+};
+
 module.exports = {
   getMe,
   updateMe,
@@ -398,4 +421,5 @@ module.exports = {
   updatePreferences,
   getRecommendedSeries,
   subscribe,
+  registerPushToken,
 };

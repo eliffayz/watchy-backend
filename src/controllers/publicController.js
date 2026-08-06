@@ -139,6 +139,28 @@ const getNotifications = async (req, res, next) => {
   }
 };
 
+// Push Token Registration
+const registerPushToken = async (req, res, next) => {
+  try {
+    const { token, platform, user_id } = req.body;
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'Token is required' });
+    }
+
+    await db.query(`
+      INSERT INTO push_tokens (user_id, token, platform, updated_at)
+      VALUES ($1, $2, $3, NOW())
+      ON CONFLICT (token) 
+      DO UPDATE SET user_id = COALESCE($1, push_tokens.user_id), platform = COALESCE($3, push_tokens.platform), updated_at = NOW()
+    `, [user_id || null, token, platform || 'ios']);
+
+    res.json({ success: true, message: 'Push token registered successfully' });
+  } catch (error) {
+    console.error('[PushToken] Registration error:', error);
+    next(error);
+  }
+};
+
 module.exports = {
   getSeries,
   getSeriesById,
@@ -147,5 +169,6 @@ module.exports = {
   getSeriesByCategory,
   getBanners,
   getEpisodeById,
-  getNotifications
+  getNotifications,
+  registerPushToken
 };

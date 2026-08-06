@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { sendPushNotification } = require('../services/pushService');
 
 // Helper to log admin actions
 const logAdminAction = async (adminId, action, entityType, entityId, details) => {
@@ -793,6 +794,29 @@ const createNotification = async (req, res, next) => {
       console.warn('[Notifications] Log warning:', eLog.message);
     }
     
+    // Trigger push notification if status is 'sent'
+    if (finalStatus === 'sent') {
+      let audience = 'All Users';
+      try {
+        if (finalTarget) {
+          const parsed = JSON.parse(finalTarget);
+          if (parsed.audience) audience = parsed.audience;
+        }
+      } catch (e) {}
+
+      sendPushNotification({
+        title,
+        body: finalMsg,
+        data: {
+          notificationId: newNotif.id,
+          type: type || 'general',
+          target_url: finalTarget,
+        },
+        userId: user_id || null,
+        audience,
+      }).catch(err => console.error('[PushService Error]:', err));
+    }
+
     res.status(201).json({ success: true, data: newNotif });
   } catch (error) {
     console.error(error);
@@ -816,6 +840,7 @@ const updateNotification = async (req, res, next) => {
       if (title !== undefined) { updates.push(`title = $${idx++}`); values.push(title); }
       if (finalMsg !== undefined) { 
         updates.push(`message = $${idx++}`); values.push(finalMsg); 
+        updates.push(`body = $${idx++}`); values.push(finalMsg); 
       }
       if (type !== undefined) { updates.push(`type = $${idx++}`); values.push(type); }
       if (target_url !== undefined || target !== undefined) {
@@ -846,6 +871,29 @@ const updateNotification = async (req, res, next) => {
       console.warn('[Notifications] Update fallback:', eUp.message);
       const result = await db.query('SELECT * FROM notifications WHERE id = $1', [id]);
       updatedNotif = result.rows[0];
+    }
+
+    // Trigger push notification if status changed to 'sent'
+    if (status === 'sent' && updatedNotif) {
+      let audience = 'All Users';
+      try {
+        if (updatedNotif.target_url) {
+          const parsed = JSON.parse(updatedNotif.target_url);
+          if (parsed.audience) audience = parsed.audience;
+        }
+      } catch (e) {}
+
+      sendPushNotification({
+        title: updatedNotif.title,
+        body: updatedNotif.message || updatedNotif.body,
+        data: {
+          notificationId: updatedNotif.id,
+          type: updatedNotif.type || 'general',
+          target_url: updatedNotif.target_url,
+        },
+        userId: updatedNotif.user_id || null,
+        audience,
+      }).catch(err => console.error('[PushService Error]:', err));
     }
 
     res.json({ success: true, data: updatedNotif });

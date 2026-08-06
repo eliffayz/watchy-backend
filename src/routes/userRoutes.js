@@ -23,5 +23,6 @@ router.put('/notifications/:id/read', userController.markNotificationRead);
 router.put('/preferences', userController.updatePreferences);
 router.get('/recommended', userController.getRecommendedSeries);
 router.post('/subscription', userController.subscribe);
+router.post('/push-token', userController.registerPushToken);
 
 module.exports = router;
