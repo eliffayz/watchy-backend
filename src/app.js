@@ -6,7 +6,24 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+const uploadsDir = path.join(__dirname, '../uploads');
+app.use('/uploads', express.static(uploadsDir));
+app.use('/uploads', (req, res, next) => {
+  const fs = require('fs');
+  const fallbackCandidates = [
+    'hero_shadows_of_destiny.jpg',
+    'cw_the_cage.jpg',
+    'billionaires.png',
+    'genre_action.jpg'
+  ];
+  for (const candidate of fallbackCandidates) {
+    const candidatePath = path.join(uploadsDir, candidate);
+    if (fs.existsSync(candidatePath)) {
+      return res.sendFile(candidatePath);
+    }
+  }
+  next();
+});
 
 // Request logging middleware for diagnostics
 app.use((req, res, next) => {

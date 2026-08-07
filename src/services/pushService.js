@@ -62,6 +62,8 @@ async function sendPushNotification({ title, body, data = {}, userId = null, aud
         title,
         body,
         data,
+        badge: 1,
+        color: '#F5C518',
         priority: 'high',
         channelId: 'default',
       }));
